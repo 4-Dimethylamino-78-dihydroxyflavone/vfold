@@ -178,6 +178,13 @@ fn parse() -> Result<Args, String> {
 }
 
 fn main() {
+    // Help is not an error: it belongs on stdout with exit 0, so `vfold --help`
+    // pipes cleanly and a wrapper script does not read it as a failure.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.is_empty() || argv.iter().any(|a| a == "-h" || a == "--help") {
+        print!("{USAGE}");
+        return;
+    }
     if let Err(e) = run() {
         eprintln!("{e}");
         std::process::exit(1);

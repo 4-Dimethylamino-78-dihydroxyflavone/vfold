@@ -1,1 +1,4 @@
 /target
+/uav64.txt
+*.onnx
+*.onnx_data
