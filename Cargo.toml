@@ -1,0 +1,24 @@
+[package]
+name = "vfold"
+version = "0.1.0"
+edition = "2021"
+description = "Fold a large unordered image set down to the k views that best cover it"
+
+[dependencies]
+# Scaled JPEG decode. The point is `Decoder::scale`, which reconstructs directly
+# from the low-frequency DCT coefficients at 1/2, 1/4 or 1/8 size. On 6000x4000
+# source frames that is ~64x less work than decoding then downscaling.
+jpeg-decoder = "0.3.2"
+# Fallback decode for non-JPEG input, and the resample to the model's square input.
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "tiff"] }
+rayon = "1.12.0"
+ort = "2.0.0-rc.12"
+# EXIF GPS only. Hand-rolling the TIFF/IFD walk is ~120 lines of well-specified
+# but fiddly parsing whose bugs would be silent wrong coordinates, which is the
+# worst possible failure here.
+kamadak-exif = "0.6.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
