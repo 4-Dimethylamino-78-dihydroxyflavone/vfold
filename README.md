@@ -13,6 +13,16 @@ pipeline is unchanged. Dependencies are `image`, `jpeg-decoder`, `rayon`, and
 vfold <IMAGE_DIR> -k 64 --out skeleton.txt --json diag.json
 ```
 
+- **[USAGE.md](USAGE.md)** — step-by-step Windows guide. Setup, every flag in
+  plain English, copy-paste PowerShell recipes, troubleshooting table. Start
+  here if you just want to run it.
+- **[AGENTS.md](AGENTS.md)** — for coding agents wiring this into a
+  view-count-limited feed-forward 3D model. How to measure the model's real
+  ceiling (rather than guess it), how to size `k`, which JSON fields gate a
+  "did it actually work" decision, and what may not be claimed without an A/B.
+
+The rest of this file is *why* the internals are the way they are.
+
 ## What it does, and why each piece is the way it is
 
 ```
