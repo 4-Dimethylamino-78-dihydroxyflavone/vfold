@@ -12,7 +12,12 @@ jpeg-decoder = "0.3.2"
 # Fallback decode for non-JPEG input, and the resample to the model's square input.
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "tiff"] }
 rayon = "1.12.0"
-ort = "2.0.0-rc.12"
+# `cuda` + `directml` compile both providers in; which one RUNS is decided at
+# startup by a ladder (CUDA -> DirectML -> CPU), each rung tried with
+# error_on_failure so the achieved device is known, not assumed. CUDA needs the
+# CUDA 12 runtime + cuDNN 9 on the host; DirectML needs only a DX12 GPU and
+# ships with Windows; CPU always works.
+ort = { version = "2.0.0-rc.12", features = ["cuda", "directml"] }
 # EXIF GPS only. Hand-rolling the TIFF/IFD walk is ~120 lines of well-specified
 # but fiddly parsing whose bugs would be silent wrong coordinates, which is the
 # worst possible failure here.

@@ -25,6 +25,7 @@
 //! similarity downstream without any error.
 
 use ort::session::{builder::GraphOptimizationLevel, Session};
+use ort::execution_providers::{CUDAExecutionProvider, DirectMLExecutionProvider};
 use ort::value::Tensor;
 use std::path::Path;
 
@@ -35,16 +36,139 @@ pub const DIM: usize = 384;
 /// `config.json: patch_size`.
 const PATCH: usize = 16;
 
+/// Where the forward pass actually runs. Not a request — the achieved outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Device {
+    Cuda,
+    DirectMl,
+    Cpu,
+}
+
+impl Device {
+    /// Sensible frames-per-call when the user leaves `--batch` on auto.
+    ///
+    /// GPU wants larger batches to amortise launch overhead; 16 at 448 px keeps
+    /// peak attention transients within a 6 GB card's budget, and the OOM
+    /// halving in the embed loop absorbs anything tighter. CPU gains nothing
+    /// past the point where GEMMs saturate the cores.
+    pub fn default_batch(self) -> usize {
+        match self {
+            Device::Cuda | Device::DirectMl => 16,
+            Device::Cpu => 8,
+        }
+    }
+}
+
+impl std::fmt::Display for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Device::Cuda => "CUDA",
+            Device::DirectMl => "DirectML",
+            Device::Cpu => "CPU",
+        })
+    }
+}
+
 pub struct Embedder {
     session: Session,
     /// Model input edge in pixels. Must be a multiple of `PATCH`.
     size: usize,
     /// Pooling grid edge, e.g. 4 for a 4x4 layout.
     grid: usize,
+    pub device: Device,
+}
+
+/// One session-build attempt against a specific device.
+///
+/// `error_on_failure` is the load-bearing detail. ort's default execution-
+/// provider registration *silently* falls back to CPU when a provider cannot
+/// initialise (missing cuDNN, no device), which would leave us reporting
+/// "CUDA" while quietly running 20x slower. Hard-failing each rung makes the
+/// ladder honest: whatever session survives is genuinely running where we say
+/// it is.
+fn try_session(model: &Path, threads: usize, dev: Device) -> Result<Session, String> {
+    // Inline closures on purpose: `ort::Error<T>` is generic over the builder
+    // state it hands back, so a single shared closure cannot serve every call.
+    let mut b = Session::builder()
+        .map_err(|e| e.to_string())?
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(|e| e.to_string())?
+        .with_intra_threads(threads)
+        .map_err(|e| e.to_string())?;
+    b = match dev {
+        Device::Cuda => b
+            .with_execution_providers([CUDAExecutionProvider::default()
+                .build()
+                .error_on_failure()])
+            .map_err(|e| e.to_string())?,
+        Device::DirectMl => b
+            .with_execution_providers([DirectMLExecutionProvider::default()
+                .build()
+                .error_on_failure()])
+            .map_err(|e| e.to_string())?,
+        Device::Cpu => b,
+    };
+    b.commit_from_file(model)
+        .map_err(|e| format!("loading {}: {e}", model.display()))
+}
+
+/// Rungs strictly below a device, for runtime demotion.
+///
+/// Session-init success does not prove a provider can run this graph, so the
+/// fallback ladder must also exist at embed time — otherwise "capable of going
+/// without" is only true for the failures that announce themselves early. This
+/// only helps with failures that come back as errors; see `new` for why the
+/// rung that can fail by access violation is excluded from auto entirely.
+pub fn ladder_below(dev: Device) -> &'static [Device] {
+    match dev {
+        Device::Cuda | Device::DirectMl => &[Device::Cpu],
+        Device::Cpu => &[],
+    }
 }
 
 impl Embedder {
-    pub fn new(model: &Path, size: usize, grid: usize, threads: usize) -> Result<Self, String> {
+    /// Build a session on the fastest device that actually works.
+    ///
+    /// `device_pref`: `auto` walks CUDA -> DirectML -> CPU and takes the first
+    /// rung that initialises; naming a device pins it and fails loudly rather
+    /// than substituting. CUDA needs the CUDA 12 runtime plus cuDNN 9 on the
+    /// machine; DirectML needs only a DX12-capable GPU (any vendor, ships with
+    /// Windows); CPU always works.
+    pub fn new(
+        model: &Path,
+        size: usize,
+        grid: usize,
+        threads: usize,
+        device_pref: &str,
+    ) -> Result<Self, String> {
+        // DirectML is deliberately NOT in the auto ladder. Measured on this
+        // model's export: the DML provider passes session init, then fails a
+        // dynamic-shape Reshape on the first run() — and the failure is
+        // nondeterministic between a returned error and a native access
+        // violation. An AV cannot be caught from Rust, so no in-process
+        // demotion can recover from it. A rung that sometimes kills the
+        // process may be *chosen* (--device dml, e.g. for a future export
+        // that works), but must never be *defaulted*.
+        let ladder: &[Device] = match device_pref {
+            "auto" => &[Device::Cuda, Device::Cpu],
+            "cuda" => &[Device::Cuda],
+            "dml" | "directml" => &[Device::DirectMl],
+            "cpu" => &[Device::Cpu],
+            other => return Err(format!("unknown --device '{other}' (auto|cuda|dml|cpu)")),
+        };
+        Self::new_on(model, size, grid, threads, ladder)
+    }
+
+    /// Build on the first rung of an explicit ladder that initialises. Used both
+    /// for the initial build and for runtime demotion after a rung that
+    /// initialised but cannot actually run the graph.
+    pub fn new_on(
+        model: &Path,
+        size: usize,
+        grid: usize,
+        threads: usize,
+        ladder: &[Device],
+    ) -> Result<Self, String> {
         if !size.is_multiple_of(PATCH) {
             return Err(format!("input size {size} is not a multiple of patch size {PATCH}"));
         }
@@ -54,15 +178,23 @@ impl Embedder {
                 "patch grid {tokens}x{tokens} does not divide evenly into a {grid}x{grid} pooling grid"
             ));
         }
-        let session = Session::builder()
-            .map_err(|e| e.to_string())?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| e.to_string())?
-            .with_intra_threads(threads)
-            .map_err(|e| e.to_string())?
-            .commit_from_file(model)
-            .map_err(|e| format!("loading {}: {e}", model.display()))?;
-        Ok(Self { session, size, grid })
+
+        let mut last_err = String::new();
+        for &dev in ladder {
+            match try_session(model, threads, dev) {
+                Ok(session) => {
+                    if dev != Device::Cuda && ladder.len() > 1 {
+                        eprintln!("[vfold] device      {dev} (higher rungs unavailable: {last_err})");
+                    }
+                    return Ok(Self { session, size, grid, device: dev });
+                }
+                Err(e) => {
+                    // Keep only the first line; ORT errors trail C++ context.
+                    last_err = e.lines().next().unwrap_or("").to_string();
+                }
+            }
+        }
+        Err(format!("no execution provider initialised: {last_err}"))
     }
 
     /// Descriptor width: one `DIM`-vector per pooled region.

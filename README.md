@@ -64,6 +64,14 @@ JPEG dir ──▶ scaled decode ──▶ DINOv3 ViT-S/16 ──▶ grid pool �
 - **Lazy greedy.** Submodularity makes Minoux's lazy evaluation return the
   bit-identical answer to naive greedy; on the 444-frame set, 1029 gain
   evaluations instead of 28,416.
+- **Honest device ladder.** `--device auto` tries CUDA then CPU, each rung
+  registered with `error_on_failure` — ORT's default silent fallback would
+  report the fast lane while running the slow one. Batch auto-sizes per device
+  and halves on OOM; a failure that persists at batch 1 demotes the device
+  mid-run, keeping descriptors already computed. Measured on 482 frames:
+  169 s CPU → 27 s CUDA. DirectML is opt-in only: the current export crashes
+  the DML provider at run time (sometimes as an uncatchable access violation),
+  and a rung that can kill the process must never be a default.
 - **GPS as a false-edge filter** (`--gps auto`, when EXIF positions exist).
   Visual similarity is only a *proxy* for co-visibility, and on repetitive ground
   the proxy breaks — two frames 300 m apart over identical crop rows are

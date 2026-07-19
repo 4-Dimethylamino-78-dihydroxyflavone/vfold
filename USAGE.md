@@ -191,10 +191,24 @@ low at k=96, the scene is bigger than your budget can cover.
 ### Faster, lower-quality pass for a quick look
 
 ```powershell
-vfold "D:\Photos\MySite" -k 64 --size 224 --batch 16
+vfold "D:\Photos\MySite" -k 64 --size 224 --grid 2 --batch 32
 ```
 
-Roughly 4× faster. Fine for a sanity check; use the default 448 for real work.
+Roughly 4× faster. `--grid 2` is required at 224 — the pooling grid must divide
+the 14×14 patch grid, and the default `--grid 4` does not (the program stops and
+says so). Fine for a sanity check; use the default 448 for real work.
+
+### Checking the GPU is actually being used
+
+The `device` line in the output says where the model ran:
+
+```
+[vfold] device      CUDA (batch 16, auto)
+```
+
+`CUDA` is the fast lane. If it says `CPU (higher rungs unavailable: ...)`, read
+the parenthesis — it names exactly what failed (usually a missing CUDA runtime
+or no NVIDIA GPU). The run still works on CPU, just ~6× slower.
 
 ---
 
@@ -215,7 +229,8 @@ Roughly 4× faster. Fine for a sanity check; use the default 448 for real work.
 | flag | default | when to change |
 |---|---|---|
 | `--size` | 448 | `224` for ~4× speed at some quality cost. Must be a multiple of 16. |
-| `--batch` | 8 | Lower it (`4`) if you run out of memory. Raise it (`16`) at `--size 224`. |
+| `--batch` | 0 (auto) | Auto picks 16 on GPU / 8 on CPU and **halves itself on out-of-memory**, so a 6 GB card self-throttles. Only set it manually to squeeze a big card (`32` gains ~10%). |
+| `--device` | auto | `auto` tries CUDA, then CPU. `dml` exists but is opt-in only — the current model export crashes the DirectML provider. `cpu` forces the slow lane. |
 | `--overlap` | 8 | Roughly how many photos show the same thing. Raise for very overlapping video frames, lower for sparse handheld sets. |
 | `--model` | `%USERPROFILE%\.cache\vfold\model.onnx` | If you put the model elsewhere. |
 | `--target-sat` | 0.70 | The auto-tuning target. `0.85` sometimes spreads slightly better. Anything below `0.5` degrades. |
@@ -247,7 +262,8 @@ Two warnings in particular:
 | `gate left only N eligible frames for k=...` | Too many photos were rejected as unusable. Usually a genuinely bad photo set. As a last resort `--min-neighbours 1`, but inspect the rejects first. |
 | `NO BETTER THAN RANDOM - appearance aliasing likely` | Your scene looks the same everywhere (crops, water, sand, uniform roof) so the program can't tell locations apart by looks. If photos have GPS this should already be handled; if not, GPS is the fix — or accept that a plain evenly-spaced selection is as good here. |
 | Rejects lots of photos from a set that looks fine | Check the listed filenames. If they really are fine, your photos may have too little overlap for the default `--overlap 8`; try `--overlap 4`. |
-| Very slow | Normal. Nearly all the time is the AI model reading images (~4 minutes per 500 photos on CPU). `--size 224` is ~4× faster. |
+| Very slow | Check the `device` line. On CUDA, 500 photos take ~30 s; on CPU ~3–4 minutes. If it fell back to CPU the parenthesis says why. `--size 224 --grid 2` is a further ~4× cheaper. |
+| `device CPU (higher rungs unavailable...)` on a machine with an NVIDIA GPU | The CUDA 12 runtime DLLs aren't findable. Keep the DLLs that the build placed next to `vfold.exe` (`onnxruntime_providers_cuda.dll` etc.) with the exe if you move it, and make sure the NVIDIA driver is current. |
 | Out of memory | Lower `--batch` to `4` or `2`. |
 | Paths with spaces fail | Quote them: `vfold "D:\My Photos\Site" -k 64`. |
 | Want to script it | Exit code `0` = success, `1` = error. `--help` also exits `0`. |

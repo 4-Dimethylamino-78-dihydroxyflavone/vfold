@@ -227,18 +227,38 @@ These constrain what you may claim in reports and commit messages.
 
 Runtime is dominated by the DINOv3 forward pass, not by selection.
 
-| stage | ~cost (500 images, CPU) | notes |
+| stage | ~cost (500 images) | notes |
 |---|---|---|
 | Decode | ~10 s | DCT-scaled; already ~64× cheaper than naive |
-| Embed | **~180–240 s** | The bottleneck. CUDA EP is not wired up yet. |
+| Embed | **~27 s CUDA / ~180–240 s CPU** | The bottleneck either way. Measured 482 frames @448 px on an RTX 4060 Ti: 169 s CPU → 27 s CUDA (batch 32 gains ~10% more; the floor is host-device copies). |
 | Whiten + similarity | < 1 s | |
 | Selection | ~0.01 s | Lazy greedy; ~1.2k gain evaluations vs 30k naive |
+
+Device handling — read the `[vfold] device` line, never assume:
+
+- `--device auto` (default) tries **CUDA → CPU**, each rung hard-failed via
+  `error_on_failure` so the achieved device is known, not hoped. Fallback prints
+  the exact init error in parentheses.
+- **DirectML is opt-in only** (`--device dml`), excluded from auto: on the
+  current DINOv3 export it passes session init then dies on a dynamic-shape
+  Reshape at run time — nondeterministically as an error *or an access
+  violation*, and an AV is uncatchable in-process. Do not put it back in the
+  auto ladder without verifying a new model export end-to-end.
+- `--batch 0` (default) sizes per device and **halves on OOM**, so low-VRAM
+  machines self-throttle. A failure persisting at batch 1 under auto triggers
+  device demotion mid-run; already-computed descriptors are kept (cross-device
+  float drift ~1e-6, far below the similarity floor).
+- If you relocate `vfold.exe`, take the provider DLLs beside it
+  (`onnxruntime_providers_cuda.dll`, `onnxruntime_providers_shared.dll`,
+  `DirectML.dll`) or CUDA silently becomes unavailable and auto lands on CPU.
 
 Consequences for agents:
 
 - **There is no descriptor cache.** Every parameter sweep re-embeds from
-  scratch. Budget ~4 minutes per run per 500 images, and prefer varying `-k`
-  across a *single* planned set of runs over interactive fiddling.
-- `--size 224` is ~4× faster for a smoke test; use 448 for anything reported.
+  scratch. On CUDA that is ~40 s per run per 500 images (tolerable to sweep);
+  on CPU ~4 minutes (plan a single batch of runs instead).
+- `--size 224 --grid 2` is ~4× faster for a smoke test (`--grid 2` is required:
+  the pooling grid must divide 224/16 = 14). Use 448 + grid 4 for anything
+  reported.
 - Selection being effectively free is why `--target-sat` auto-calibration can
   afford ~14 full selection probes per run.

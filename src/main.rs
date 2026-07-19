@@ -60,6 +60,10 @@ struct Args {
     out: Option<PathBuf>,
     json: Option<PathBuf>,
     threads: usize,
+    /// Where the model forward pass runs. `auto` prefers the fast lane and
+    /// degrades honestly: CUDA -> DirectML -> CPU, each rung hard-failed rather
+    /// than silently substituted. See `embed::Embedder::new`.
+    device: String,
 }
 
 const USAGE: &str = "\
@@ -73,7 +77,13 @@ OPTIONS:
         --model <PATH>      DINOv3 ONNX  [default: %USERPROFILE%\\.cache\\vfold\\model.onnx]
         --size <PX>         model input edge, multiple of 16       [default: 448]
         --grid <G>          pooling grid edge (GxG regions)        [default: 4]
-        --batch <N>         frames per inference call              [default: 8]
+        --device <D>        auto | cuda | dml | cpu             [default: auto]
+                            auto tries CUDA then CPU. dml is opt-in
+                            only: the current DINOv3 export crashes
+                            the DirectML provider at runtime
+        --batch <N>         frames per inference call; 0 = auto
+                            (16 on GPU, 8 on CPU), halves itself
+                            on out-of-memory                       [default: 0]
         --objective <NAME>  saturated | facility | proportional    [default: saturated]
         --sat-mult <F>      cap = F x median nearest-neighbour sim;
                             0 auto-calibrates to --target-sat        [default: 0]
@@ -113,7 +123,7 @@ fn parse() -> Result<Args, String> {
         model: PathBuf::from(&home).join(".cache").join("vfold").join("model.onnx"),
         size: 448,
         grid: 4,
-        batch: 8,
+        batch: 0,
         objective: "saturated".into(),
         sat_mult: 0.0,
         target_sat: 0.70,
@@ -127,6 +137,7 @@ fn parse() -> Result<Args, String> {
         out: None,
         json: None,
         threads: std::thread::available_parallelism().map(|n| n.get().saturating_sub(2).max(1)).unwrap_or(4),
+        device: "auto".into(),
     };
 
     let mut i = 0;
@@ -160,6 +171,7 @@ fn parse() -> Result<Args, String> {
             "-o" | "--out" => { a.out = Some(PathBuf::from(next(i)?)); i += 2 }
             "--json" => { a.json = Some(PathBuf::from(next(i)?)); i += 2 }
             "--threads" => { a.threads = num(next(i)?, "--threads")? as usize; i += 2 }
+            "--device" => { a.device = next(i)?; i += 2 }
             s if s.starts_with('-') => return Err(format!("unknown flag {s}\n\n{USAGE}")),
             s => {
                 if positional {
@@ -231,22 +243,72 @@ fn run() -> Result<(), String> {
 
     // --- embed --------------------------------------------------------------
     let t = Instant::now();
-    let mut embedder = embed::Embedder::new(&a.model, a.size, a.grid, a.threads)?;
+    let mut embedder = embed::Embedder::new(&a.model, a.size, a.grid, a.threads, &a.device)?;
+    let mut batch = if a.batch == 0 { embedder.device.default_batch() } else { a.batch };
+    eprintln!(
+        "[vfold] device      {} (batch {}{})",
+        embedder.device,
+        batch,
+        if a.batch == 0 { ", auto" } else { "" }
+    );
+
+    // Two recovery axes, cheapest first:
+    //
+    // 1. Batch halving — on failure at batch > 1, halve and retry the same
+    //    frames. A VRAM out-of-memory recovers a few halvings later; this is
+    //    what lets one binary punch it on a 16 GB card and degrade gracefully
+    //    on a 6 GB laptop without either being configured.
+    //
+    // 2. Device demotion — a failure that persists at batch 1 is not memory
+    //    pressure, it is "this provider cannot run this graph" (measured: the
+    //    DML provider builds a session for this model, then dies on a
+    //    dynamic-shape Reshape at every batch size). Under --device auto,
+    //    rebuild on the next rung down and keep going; descriptors already
+    //    computed are kept. Cross-device float differences are ~1e-6 on unit
+    //    vectors — far below the similarity floor — so a mixed corpus is fine.
+    //    A pinned --device fails loudly instead: substituting hardware the user
+    //    named would be lying.
     let mut descs: Vec<Vec<f32>> = Vec::with_capacity(frames.len());
-    for (bi, chunk) in frames.chunks(a.batch).enumerate() {
-        let batch: Vec<Vec<f32>> = chunk.iter().map(|f| f.tensor.clone()).collect();
-        descs.extend(embedder.embed_batch(&batch)?);
-        if bi % 8 == 0 {
-            eprint!("\r[vfold] embedding {}/{}", descs.len(), frames.len());
+    while descs.len() < frames.len() {
+        let start = descs.len();
+        let end = (start + batch).min(frames.len());
+        let chunk: Vec<Vec<f32>> = frames[start..end].iter().map(|f| f.tensor.clone()).collect();
+        match embedder.embed_batch(&chunk) {
+            Ok(d) => {
+                descs.extend(d);
+                eprint!("\r[vfold] embedding {}/{}", descs.len(), frames.len());
+            }
+            Err(e) if batch > 1 => {
+                batch = (batch / 2).max(1);
+                eprintln!(
+                    "\r[vfold] batch failed ({}); retrying at batch {batch}",
+                    e.lines().next().unwrap_or("")
+                );
+            }
+            Err(e) => {
+                let below = embed::ladder_below(embedder.device);
+                if a.device != "auto" || below.is_empty() {
+                    return Err(e);
+                }
+                eprintln!(
+                    "\r[vfold] {} cannot run this graph ({}); demoting",
+                    embedder.device,
+                    e.lines().next().unwrap_or("")
+                );
+                embedder = embed::Embedder::new_on(&a.model, a.size, a.grid, a.threads, below)?;
+                batch = if a.batch == 0 { embedder.device.default_batch() } else { a.batch };
+                eprintln!("[vfold] device      {} (batch {batch})", embedder.device);
+            }
         }
     }
     eprintln!(
-        "\r[vfold] embedded {} frames -> {}-d ({}x{} grid x {}) in {:.1}s",
+        "\r[vfold] embedded {} frames -> {}-d ({}x{} grid x {}) on {} in {:.1}s",
         descs.len(),
         embedder.width(),
         a.grid,
         a.grid,
         embed::DIM,
+        embedder.device,
         t.elapsed().as_secs_f32()
     );
 
@@ -440,9 +502,9 @@ fn write_json(
     s.push_str(&format!(
         "  \"params\": {{\"size\": {}, \"grid\": {}, \"objective\": \"{}\", \"sat_mult\": {}, \
          \"overlap\": {}, \"min_neighbours\": {}, \"gps\": \"{}\", \"gps_scale\": {}, \
-         \"power\": {}, \"drop_pcs\": {}, \"sigma_floor\": {}}},\n",
+         \"power\": {}, \"drop_pcs\": {}, \"sigma_floor\": {}, \"device\": \"{}\"}},\n",
         a.size, a.grid, a.objective, a.sat_mult, a.overlap, a.min_neighbours,
-        a.gps, a.gps_scale, a.power, a.drop_pcs, a.sigma_floor
+        a.gps, a.gps_scale, a.power, a.drop_pcs, a.sigma_floor, a.device
     ));
     s.push_str(&format!(
         "  \"similarity\": {{\"p05\": {:.4}, \"p50\": {:.4}, \"p95\": {:.4}, \"mean_nn1\": {:.4}}},\n",
