@@ -251,6 +251,15 @@ Device handling — read the `[vfold] device` line, never assume:
 - If you relocate `vfold.exe`, take the provider DLLs beside it
   (`onnxruntime_providers_cuda.dll`, `onnxruntime_providers_shared.dll`,
   `DirectML.dll`) or CUDA silently becomes unavailable and auto lands on CPU.
+- For a machine without the CUDA toolkit, use `package.ps1`: it assembles a
+  fully self-contained `dist\vfold-win64\` (exe + providers + CUDA runtime +
+  cuDNN + model, ~1.5 GB) verified by stripped-PATH runs on both GPU and
+  simulated GPU-less hosts. The DLL manifest is empirical — `cufft64_11.dll`
+  is import-linked and mandatory despite no FFT ever executing; `cudnn_adv`
+  and `nvrtc` are lazily loaded and correctly omitted. Do not edit the
+  manifest without re-running the stripped-PATH test. There is no Vulkan
+  rung: `ort/webgpu` does not link on rc.12's prebuilt Windows binaries
+  (verified), so portability = bundled CUDA + universal CPU fallback.
 
 Consequences for agents:
 

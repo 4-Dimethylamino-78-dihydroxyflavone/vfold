@@ -16,6 +16,10 @@ vfold <IMAGE_DIR> -k 64 --out skeleton.txt --json diag.json
 - **[USAGE.md](USAGE.md)** — step-by-step Windows guide. Setup, every flag in
   plain English, copy-paste PowerShell recipes, troubleshooting table. Start
   here if you just want to run it.
+- **[package.ps1](package.ps1)** — assembles a fully portable `dist\vfold-win64\`
+  (~1.5 GB: exe + ONNX Runtime providers + CUDA runtime + cuDNN + model) that
+  runs on any Windows x64 machine with nothing installed — GPU when an NVIDIA
+  card is present, CPU otherwise. Verified by stripped-PATH runs both ways.
 - **[AGENTS.md](AGENTS.md)** — for coding agents wiring this into a
   view-count-limited feed-forward 3D model. How to measure the model's real
   ceiling (rather than guess it), how to size `k`, which JSON fields gate a

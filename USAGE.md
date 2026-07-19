@@ -270,7 +270,43 @@ Two warnings in particular:
 
 ---
 
-## 7. What it does not do
+## 7. Taking it to another machine (portable bundle)
+
+You don't install vfold on a second machine — you copy a folder. On the machine
+that has the Rust toolchain and CUDA installed, run once:
+
+```powershell
+cd C:\path\to\vfold
+.\package.ps1          # assembles dist\vfold-win64\  (~1.5 GB)
+.\package.ps1 -Zip     # ... and zips it for transfer
+```
+
+The folder contains vfold.exe, the ONNX Runtime providers, the CUDA runtime and
+cuDNN DLLs, and the model itself. The target machine needs **nothing installed**
+— no CUDA toolkit, no cuDNN, no Rust, no internet. Copy the folder anywhere and
+run from inside it:
+
+```powershell
+.\vfold.exe "D:\Photos\Site" -k 64 --model .\model\model.onnx
+```
+
+- NVIDIA GPU present (any VRAM — a 6 GB laptop is fine, batch self-throttles):
+  the device line says `CUDA` and 500 photos take ~30 s.
+- No NVIDIA GPU: the device line says `CPU` with the reason, and the same
+  command completes ~6× slower. Nothing to configure either way.
+
+The one rule: **keep the DLLs in the same folder as the exe.** Windows resolves
+libraries from the exe's directory first; that is the entire mechanism that
+makes the bundle self-contained. Move the exe alone and CUDA quietly becomes
+unavailable.
+
+Why 1.5 GB: cuDNN's precompiled GPU kernels (~400 MB) and cuBLAS (~560 MB)
+simply are that large, and `cufft64_11.dll` (181 MB) must ride along even
+though nothing here uses FFTs — the CUDA provider import-links it, so it fails
+to load without it. This was measured, not assumed (the bundle was tested with
+a stripped PATH on both a GPU and a simulated GPU-less machine).
+
+## 8. What it does not do
 
 - It does **not** reconstruct anything. It only chooses photos. Feed the result
   to your actual 3D program.
