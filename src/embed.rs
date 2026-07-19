@@ -45,18 +45,52 @@ pub enum Device {
 }
 
 impl Device {
-    /// Sensible frames-per-call when the user leaves `--batch` on auto.
+    /// Frames-per-call when the user leaves `--batch` on auto.
     ///
-    /// GPU wants larger batches to amortise launch overhead; 16 at 448 px keeps
-    /// peak attention transients within a 6 GB card's budget, and the OOM
-    /// halving in the embed loop absorbs anything tighter. CPU gains nothing
-    /// past the point where GEMMs saturate the cores.
-    pub fn default_batch(self) -> usize {
+    /// On CUDA the answer is sized to the card: free VRAM is probed via
+    /// `nvidia-smi` (which ships with the driver — wherever the CUDA rung can
+    /// exist, so can the probe) and divided by the measured in-flight cost of
+    /// ~150 MB per image at 448 px (ORT arena + cuDNN workspaces, watched grow
+    /// 2.4 -> 9.7 GB during a batch-48 embed). A 16 GB card lands on the cap;
+    /// a 6 GB laptop lands near 26 and the OOM halving in the embed loop
+    /// absorbs any remaining optimism — the safety net is what makes an
+    /// aggressive default safe. The cap reflects the measured plateau: past
+    /// batch ~48 the wall clock is host-device copies, not compute (27.4 s at
+    /// 16, 24.6 at 32, 24.2 at 48), so a larger number buys risk, not speed.
+    ///
+    /// Returns the batch and, when probed, the free VRAM it was derived from.
+    pub fn auto_batch(self) -> (usize, Option<u32>) {
         match self {
-            Device::Cuda | Device::DirectMl => 16,
-            Device::Cpu => 8,
+            Device::Cuda | Device::DirectMl => match free_vram_mb() {
+                Some(free) => {
+                    const RESERVE_MB: u32 = 1024; // other apps, fragmentation
+                    const PER_IMAGE_MB: u32 = 150;
+                    let b = (free.saturating_sub(RESERVE_MB) / PER_IMAGE_MB).clamp(8, 64);
+                    (b as usize, Some(free))
+                }
+                None => (16, None), // probe failed; the pre-probe conservative default
+            },
+            Device::Cpu => (8, None),
         }
     }
+}
+
+/// Free VRAM on the first GPU, in MiB, via `nvidia-smi`.
+///
+/// A subprocess rather than an NVML binding on purpose: the probe is one line
+/// of parsing, runs once per invocation, and adds no dependency. Any failure —
+/// no nvidia-smi, no GPU, unparseable output — degrades to the conservative
+/// default rather than an error, because sizing a batch is never worth failing
+/// a run over.
+fn free_vram_mb() -> Option<u32> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).lines().next()?.trim().parse().ok()
 }
 
 impl std::fmt::Display for Device {

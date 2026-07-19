@@ -244,10 +244,15 @@ Device handling — read the `[vfold] device` line, never assume:
   Reshape at run time — nondeterministically as an error *or an access
   violation*, and an AV is uncatchable in-process. Do not put it back in the
   auto ladder without verifying a new model export end-to-end.
-- `--batch 0` (default) sizes per device and **halves on OOM**, so low-VRAM
-  machines self-throttle. A failure persisting at batch 1 under auto triggers
-  device demotion mid-run; already-computed descriptors are kept (cross-device
-  float drift ~1e-6, far below the similarity floor).
+- `--batch 0` (default) probes free VRAM via `nvidia-smi` and sizes the batch
+  as `(free − 1 GB) / 150 MB`, clamped to [8, 64] — the 150 MB/image constant
+  was measured (process VRAM 2.4 → 9.7 GB during a batch-48 embed), and the
+  64 cap marks the measured plateau where host-device copies dominate. It then
+  **halves on OOM**, so low-VRAM machines self-throttle; the aggressive default
+  is safe *because* of that net. A failure persisting at batch 1 under auto
+  triggers device demotion mid-run; already-computed descriptors are kept
+  (cross-device float drift ~1e-6, far below the similarity floor). Probe
+  failure (no nvidia-smi) degrades to batch 16, never to an error.
 - If you relocate `vfold.exe`, take the provider DLLs beside it
   (`onnxruntime_providers_cuda.dll`, `onnxruntime_providers_shared.dll`,
   `DirectML.dll`) or CUDA silently becomes unavailable and auto lands on CPU.

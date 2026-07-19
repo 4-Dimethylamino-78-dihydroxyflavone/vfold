@@ -229,7 +229,7 @@ or no NVIDIA GPU). The run still works on CPU, just ~6× slower.
 | flag | default | when to change |
 |---|---|---|
 | `--size` | 448 | `224` for ~4× speed at some quality cost. Must be a multiple of 16. |
-| `--batch` | 0 (auto) | Auto picks 16 on GPU / 8 on CPU and **halves itself on out-of-memory**, so a 6 GB card self-throttles. Only set it manually to squeeze a big card (`32` gains ~10%). |
+| `--batch` | 0 (auto) | Auto **probes free VRAM** (via nvidia-smi) and sizes the batch to the card — a 16 GB card maxes out at 64, a 6 GB laptop lands around 25, CPU uses 8 — then **halves itself on out-of-memory** as the safety net. The device line shows the derivation: `CUDA (batch 64, auto from 13.1 GB free VRAM)`. Manual values are only for experiments. |
 | `--device` | auto | `auto` tries CUDA, then CPU. `dml` exists but is opt-in only — the current model export crashes the DirectML provider. `cpu` forces the slow lane. |
 | `--overlap` | 8 | Roughly how many photos show the same thing. Raise for very overlapping video frames, lower for sparse handheld sets. |
 | `--model` | `%USERPROFILE%\.cache\vfold\model.onnx` | If you put the model elsewhere. |

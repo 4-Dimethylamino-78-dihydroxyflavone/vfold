@@ -244,12 +244,20 @@ fn run() -> Result<(), String> {
     // --- embed --------------------------------------------------------------
     let t = Instant::now();
     let mut embedder = embed::Embedder::new(&a.model, a.size, a.grid, a.threads, &a.device)?;
-    let mut batch = if a.batch == 0 { embedder.device.default_batch() } else { a.batch };
+    let (mut batch, probed_vram) = if a.batch == 0 {
+        embedder.device.auto_batch()
+    } else {
+        (a.batch, None)
+    };
     eprintln!(
         "[vfold] device      {} (batch {}{})",
         embedder.device,
         batch,
-        if a.batch == 0 { ", auto" } else { "" }
+        match (a.batch, probed_vram) {
+            (0, Some(free)) => format!(", auto from {:.1} GB free VRAM", free as f32 / 1024.0),
+            (0, None) => ", auto".into(),
+            _ => "".into(),
+        }
     );
 
     // Two recovery axes, cheapest first:
@@ -296,7 +304,7 @@ fn run() -> Result<(), String> {
                     e.lines().next().unwrap_or("")
                 );
                 embedder = embed::Embedder::new_on(&a.model, a.size, a.grid, a.threads, below)?;
-                batch = if a.batch == 0 { embedder.device.default_batch() } else { a.batch };
+                batch = if a.batch == 0 { embedder.device.auto_batch().0 } else { a.batch };
                 eprintln!("[vfold] device      {} (batch {batch})", embedder.device);
             }
         }
