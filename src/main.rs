@@ -17,6 +17,7 @@ mod decode;
 mod descriptor;
 mod embed;
 mod gps;
+mod video;
 
 use coverage::{Objective, Sim};
 use std::path::{Path, PathBuf};
@@ -57,6 +58,12 @@ struct Args {
     power: f32,
     drop_pcs: usize,
     sigma_floor: f32,
+    /// Video inputs: sharpest-frame candidates kept per second of footage.
+    /// The quality gate density, not the selection budget — `-k` still decides
+    /// how many survive coverage selection.
+    vfps: f32,
+    /// Where extracted video frames land. Defaults beside the input.
+    frames_dir: Option<PathBuf>,
     out: Option<PathBuf>,
     json: Option<PathBuf>,
     threads: usize,
@@ -70,7 +77,13 @@ const USAGE: &str = "\
 vfold - fold a large image set down to the k views that best cover it
 
 USAGE:
-    vfold <IMAGE_DIR> [OPTIONS]
+    vfold <IMAGE_DIR | VIDEO_DIR | VIDEO_FILE> [OPTIONS]
+
+Video input (.mp4/.mov/.m4v/.avi/.mkv, needs ffmpeg on PATH): every frame is
+sharpness-scored (Laplacian variance) and the sharpest frame per window is
+extracted at full resolution into --frames-dir, then selection runs on those
+candidates exactly as on photographs. frames_index.tsv maps each candidate
+back to its clip, frame number and timestamp.
 
 OPTIONS:
     -k, --keep <N>          views to select                        [default: 64]
@@ -98,6 +111,10 @@ OPTIONS:
         --power <F>         similarity sharpening exponent         [default: 1.0]
         --drop-pcs <N>      leading principal components to remove [default: 1]
         --sigma-floor <F>   whitening floor as fraction of max     [default: 0.3]
+        --vfps <F>          video: sharpness-gate candidates kept
+                            per second of footage                  [default: 2]
+        --frames-dir <PATH> video: extracted frames + manifest go here
+                            [default: <input>\\vfold_frames]
     -o, --out <PATH>        write list here as well as stdout
         --json <PATH>       write diagnostics JSON
         --threads <N>       worker threads                    [default: cores-2]
@@ -134,6 +151,8 @@ fn parse() -> Result<Args, String> {
         power: 1.0,
         drop_pcs: 1,
         sigma_floor: 0.3,
+        vfps: 2.0,
+        frames_dir: None,
         out: None,
         json: None,
         threads: std::thread::available_parallelism().map(|n| n.get().saturating_sub(2).max(1)).unwrap_or(4),
@@ -168,6 +187,8 @@ fn parse() -> Result<Args, String> {
             "--power" => { a.power = num(next(i)?, "--power")?; i += 2 }
             "--drop-pcs" => { a.drop_pcs = num(next(i)?, "--drop-pcs")? as usize; i += 2 }
             "--sigma-floor" => { a.sigma_floor = num(next(i)?, "--sigma-floor")?; i += 2 }
+            "--vfps" => { a.vfps = num(next(i)?, "--vfps")?; i += 2 }
+            "--frames-dir" => { a.frames_dir = Some(PathBuf::from(next(i)?)); i += 2 }
             "-o" | "--out" => { a.out = Some(PathBuf::from(next(i)?)); i += 2 }
             "--json" => { a.json = Some(PathBuf::from(next(i)?)); i += 2 }
             "--threads" => { a.threads = num(next(i)?, "--threads")? as usize; i += 2 }
@@ -211,11 +232,31 @@ fn run() -> Result<(), String> {
         .ok();
 
     let t0 = Instant::now();
-    let paths = decode::list_images(&a.dir)?;
+
+    // Video inputs pass a sharpness gate that materialises candidate frames on
+    // disk; from there the pipeline is identical to a directory of photographs
+    // (and the emitted list points at real JPEGs, which is what downstream
+    // consumers of the .txt need).
+    let src_dir = match video::detect(&a.dir)? {
+        Some(videos) => {
+            let fdir =
+                a.frames_dir.clone().unwrap_or_else(|| video::default_frames_dir(&a.dir));
+            eprintln!(
+                "[vfold] video input: {} clip(s), sharpness gate at {} candidates/s",
+                videos.len(),
+                a.vfps
+            );
+            video::extract(&videos, &fdir, a.size as u32, a.vfps)?;
+            fdir
+        }
+        None => a.dir.clone(),
+    };
+
+    let paths = decode::list_images(&src_dir)?;
     if paths.is_empty() {
-        return Err(format!("no images in {}", a.dir.display()));
+        return Err(format!("no images in {}", src_dir.display()));
     }
-    eprintln!("[vfold] {} images in {}", paths.len(), a.dir.display());
+    eprintln!("[vfold] {} images in {}", paths.len(), src_dir.display());
     if a.k >= paths.len() {
         return Err(format!(
             "-k {} is not smaller than the {} images available; nothing to fold",

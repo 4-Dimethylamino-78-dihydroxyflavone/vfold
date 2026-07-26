@@ -115,8 +115,10 @@ fn decode_jpeg_scaled(path: &Path, target: u32) -> Result<RgbImage, String> {
     Ok(rgb)
 }
 
-/// Variance of the 4-neighbour Laplacian. Standard focus measure.
-fn laplacian_variance(grey: &[f32], w: usize) -> f32 {
+/// Variance of the 4-neighbour Laplacian. Standard focus measure. Shared with
+/// the video gate so a video frame's sharpness and a photograph's `focus` are
+/// the same number.
+pub fn laplacian_variance(grey: &[f32], w: usize) -> f32 {
     let h = grey.len() / w;
     if w < 3 || h < 3 {
         return 0.0;

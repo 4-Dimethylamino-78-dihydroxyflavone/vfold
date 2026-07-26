@@ -87,6 +87,42 @@ vfold "D:\Photos\MySite" -k 64 --out chosen.txt --json report.json
 **Quote any path containing spaces.** `D:\My Photos\Site` without quotes will be
 read as two separate arguments and fail.
 
+### Video input
+
+Point vfold at a folder of videos (or one video file) instead of photos:
+
+```powershell
+vfold "D:\Photos\FlightVideos" -k 60 --out chosen.txt
+```
+
+Requires `ffmpeg`/`ffprobe` on PATH (`winget install Gyan.FFmpeg`). What
+happens: every frame of every clip is scored for sharpness (variance of the
+Laplacian — the same `focus` number photos get), the sharpest frame in each
+half-second window survives, and those winners are extracted at full resolution
+into `<folder>\vfold_frames\` before selection runs on them exactly as on
+photos. Extracted frames are named `<clip>_f<frame>_t<seconds>s.jpg` so you can
+find the moment in the source clip by eye, and `vfold_frames\frames_index.tsv`
+maps every candidate to its clip, frame number, timestamp and sharpness score.
+
+| flag | default | what it does |
+|---|---|---|
+| `--vfps` | 2 | Sharpness-gate survivors per second of footage. This is candidate density, not the final count — `-k` still decides that. |
+| `--frames-dir` | `<input>\vfold_frames` | Where extracted frames and the manifest land. |
+
+Three things to know:
+
+- A folder holding **both** photos and videos uses the photos and ignores the
+  videos (it says so). Separate them if you want the videos used.
+- Extracted frames carry **no GPS**, so the `spatial` scorecard line is absent —
+  selection is appearance-only, and the spatial claim is unverified (same as any
+  no-GPS photo set).
+- Re-runs reuse frames already extracted (cheap). But if you change `--vfps`,
+  frames from the old setting are still in `vfold_frames` and join the candidate
+  pool — delete the folder first for a clean slate.
+- Variable-frame-rate footage (some phones; DJI clips are constant-rate) gets a
+  warning: the sharpness score can belong to the frame one slot away from the
+  one extracted. Bounded at ±1 frame, but know it's there.
+
 ---
 
 ## 3. Reading the output
@@ -311,5 +347,6 @@ a stripped PATH on both a GPU and a simulated GPU-less machine).
 - It does **not** reconstruct anything. It only chooses photos. Feed the result
   to your actual 3D program.
 - It does **not** look in subfolders.
-- It does **not** modify, move, or delete any of your photos. It only reads them.
+- It does **not** modify, move, or delete any of your photos or videos. It only
+  reads them. (Video input *adds* files: extracted frames under `vfold_frames`.)
 - It does **not** need internet after the one-time model download.

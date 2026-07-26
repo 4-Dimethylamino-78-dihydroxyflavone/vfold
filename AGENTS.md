@@ -144,6 +144,37 @@ take rank 0.
 
 ---
 
+## 4b. Video input
+
+A video directory (or single clip) is accepted directly: an ffmpeg-backed gate
+scores every frame's Laplacian variance and keeps the sharpest frame per window
+(`--vfps` winners/second, default 2), extracts winners at full resolution into
+`--frames-dir` (default `<input>\vfold_frames`), then the normal pipeline runs
+on those. `frames_index.tsv` maps candidates back to clip/frame/timestamp.
+The gate is argmax-per-window, deliberately not a global threshold: absolute
+sharpness tracks scene texture as much as focus.
+
+Constraints an agent must respect:
+
+- **Extracted frames carry no EXIF GPS**, so the spatial audit (§5) is absent
+  and the no-GPS fallback rules apply. Do not claim spatial coverage for a
+  video-sourced selection.
+- The candidate pool is *the frames directory's contents*, so a `--vfps` change
+  without deleting `vfold_frames` unions old and new candidates. Reproducible
+  runs start from a clean frames dir.
+- **VFR clips get a probe-time warning** (r_frame_rate vs avg_frame_rate
+  disagreement > 0.5%): the scoring pipe is pinned to a CFR timeline
+  (`-fps_mode cfr -r r_frame_rate`), and around VFR timing gaps the extracted
+  winner can be the frame one slot away from the scored one (empirically
+  bounded at ±1). CFR sources — all DJI footage measured — are exact.
+- Same-stem clips in one folder (`X.MP4` + `X.MOV`) are refused loudly: their
+  extracted names would collide and misattribute frames.
+- The sharpness gate's downstream effect on reconstruction quality is
+  **unmeasured**. What is verified: the gate runs, winners are the per-window
+  Laplacian argmax, and selection behaves identically to a photo directory.
+
+---
+
 ## 5. Verify before you believe it
 
 Parse `--json`. Schema:
