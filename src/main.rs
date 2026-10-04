@@ -87,7 +87,8 @@ back to its clip, frame number and timestamp.
 
 OPTIONS:
     -k, --keep <N>          views to select                        [default: 64]
-        --model <PATH>      DINOv3 ONNX  [default: %USERPROFILE%\\.cache\\vfold\\model.onnx]
+        --model <PATH>      DINOv3 ONNX  [default: <exe dir>\\model\\model.onnx,
+                            else %USERPROFILE%\\.cache\\vfold\\model.onnx]
         --size <PX>         model input edge, multiple of 16       [default: 448]
         --grid <G>          pooling grid edge (GxG regions)        [default: 4]
         --device <D>        auto | cuda | dml | cpu             [default: auto]
@@ -137,7 +138,13 @@ fn parse() -> Result<Args, String> {
     let mut a = Args {
         dir: PathBuf::new(),
         k: 64,
-        model: PathBuf::from(&home).join(".cache").join("vfold").join("model.onnx"),
+        // A self-contained install (package.ps1's layout) keeps the model in
+        // <exe dir>\model\; otherwise the user cache.
+        model: std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|d| d.join("model").join("model.onnx")))
+            .filter(|p| p.is_file())
+            .unwrap_or_else(|| PathBuf::from(&home).join(".cache").join("vfold").join("model.onnx")),
         size: 448,
         grid: 4,
         batch: 0,
